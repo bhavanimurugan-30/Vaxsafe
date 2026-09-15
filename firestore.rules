@@ -1,0 +1,26 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Each signed-in user can read their own clinic assignment.
+    match /users/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if false; // managed via seed script / admin only
+    }
+
+    // Clinic names are readable by any signed-in user.
+    match /clinics/{clinicId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Vaccines can only be read/written by users belonging to that clinic.
+    match /vaccines/{vaccineId} {
+      allow read: if request.auth != null
+        && resource.data.clinicId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.clinicId;
+      allow create: if request.auth != null
+        && request.resource.data.clinicId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.clinicId;
+      allow update, delete: if false; // not needed in this phase
+    }
+  }
+}
