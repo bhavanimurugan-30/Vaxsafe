@@ -1,135 +1,157 @@
-# VaxSafe — Vaccine Cold-Chain Tracking & Logistics
+# VaxSafe — Discard + QR Scan Out / Scan In Workflow
 
-**VaxSafe** is a professional, production-style healthcare and cold-chain logistics operations platform designed to monitor vaccine storage, track vaccine batches, detect temperature breaches, and rapidly reroute compromised vaccines to the nearest facility using geodesic (Haversine) proximity calculations.
-
----
-
-## Tech Stack
-
-- **Frontend**: React 18, Vite 5, Tailwind CSS
-- **Authentication**: Firebase Authentication (Email/Password) with Resilient Operations Engine fallback
-- **Database**: Firebase Cloud Firestore with local operational state caching
-- **Barcodes & QR**: `qrcode.react` (generation, label printing, PNG download) & `html5-qrcode` (camera scanner + manual Batch ID fallback)
-- **Telemetry & Visualization**: Recharts 24-hour thermal profile with safe band (2°C – 8°C)
-- **Smart Rerouting**: Pure JavaScript implementation of the spherical Haversine distance formula
-- **Deployment**: Vercel ready (`vercel.json` SPA routing rewrites)
+This document describes the vaccine **Discard** and **QR-based Scan Out / Scan In**
+transfer workflow added to VaxSafe. It reuses the existing QR generator,
+`QRScanner` component, and `dataService` — no QR/data logic was duplicated.
 
 ---
 
-## Directory Layout
+## 1. Workflow Overview
 
 ```
-vaxsafe/
-├── public/
-│   └── favicon.svg
-├── src/
-│   ├── components/
-│   │   ├── common/
-│   │   │   ├── Badge.jsx
-│   │   │   ├── Button.jsx
-│   │   │   └── Modal.jsx
-│   │   ├── layout/
-│   │   │   ├── AppLayout.jsx
-│   │   │   ├── Header.jsx
-│   │   │   └── Sidebar.jsx
-│   │   ├── qr/
-│   │   │   ├── QRGeneratorModal.jsx
-│   │   │   ├── QRScanner.jsx
-│   │   │   └── PrintableLabel.jsx
-│   │   ├── temperature/
-│   │   │   ├── TemperatureChart.jsx
-│   │   │   ├── ManualTempEntryModal.jsx
-│   │   │   └── MockSensorControls.jsx
-│   │   └── rerouting/
-│   │       ├── ClinicDistanceCard.jsx
-│   │       └── ReroutingModal.jsx
-│   ├── context/
-│   │   ├── AuthContext.jsx
-│   │   ├── DataContext.jsx
-│   │   └── ToastContext.jsx
-│   ├── services/
-│   │   ├── firebase.js          # Firebase SDK initialization & fallback check
-│   │   ├── dataService.js       # Abstracted Firestore & Local Operations engine
-│   │   ├── haversine.js         # Spherical geodesic distance & transit calculations
-│   │   ├── mockSensors.js       # Simulated IoT telemetry & spike injection
-│   │   └── seedData.js          # Predefined clinics (A, B, C, D) & inventory
-│   ├── pages/
-│   │   ├── LoginPage.jsx
-│   │   ├── DashboardPage.jsx
-│   │   ├── VaccinesPage.jsx
-│   │   ├── VaccineDetailPage.jsx
-│   │   ├── QRScannerPage.jsx
-│   │   ├── TemperaturePage.jsx
-│   │   ├── BreachAlertsPage.jsx
-│   │   ├── SmartReroutingPage.jsx
-│   │   └── ProfilePage.jsx
-│   ├── App.jsx
-│   ├── index.css
-│   └── main.jsx
-├── .env
-├── .env.example
-├── vercel.json
-├── package.json
-└── vite.config.js
+REGISTER BATCH
+   → GENERATE QR              (existing QRGeneratorModal — unchanged)
+   → SOURCE SCANS QR          (existing QRScanner — reused)
+   → VERIFY BATCH              dataService.getVaccineByBatchId()
+   → CONFIRM SCAN OUT          dataService.scanOutVaccine()
+   → status: IN TRANSIT
+   → DESTINATION SCANS SAME QR (same QRScanner instance, same batchId)
+   → VERIFY TRANSFER           dataService.scanInVaccine()
+   → CONFIRM SCAN IN
+   → status: RECEIVED / IN STORAGE
+   → INVENTORY UPDATED         (status-derived, no separate ledger needed)
+   → HISTORY UPDATED           statusHistory sub-collection / local history map
 ```
 
----
-
-## Pre-Seeded Network Facilities
-
-| Facility | Latitude | Longitude | Capacity | Director Account |
-| :--- | :--- | :--- | :--- | :--- |
-| **Clinic A - Metro Central General Hospital** | 40.7128 | -74.0060 | 12,000 doses | `admin@clinic-a.vaxsafe.org` |
-| **Clinic B - Riverside Community Clinic** | 40.7831 | -73.9712 | 4,500 doses | `ops@clinic-b.vaxsafe.org` |
-| **Clinic C - Harbor Regional Medical Center** | 40.6782 | -73.9442 | 8,000 doses | `pharm@clinic-c.vaxsafe.org` |
-| **Clinic D - Valley Memorial Hospital** | 40.8448 | -73.8648 | 6,000 doses | `supply@clinic-d.vaxsafe.org` |
-
-*Password for all demo accounts*: `Password123!` (or use the one-click quick login buttons on the login screen).
+The QR code always encodes only the batch's `batchId` (unchanged from the
+original `QRGeneratorModal`). **No new QR is ever generated for a scan** —
+every Scan Out / Scan In re-resolves the same registered batch record.
 
 ---
 
-## Running Locally
+## 2. Discard Vaccine
 
-1. Install dependencies (already completed):
-   ```bash
-   npm install
-   ```
+**Where:** `VaccinesPage.jsx` (Vaccine Inventory table)
 
-2. Start the development server:
-   ```bash
-   npm run dev
-   ```
-   Open `http://localhost:5173` in your browser.
-
-3. Build for production:
-   ```bash
-   npm run build
-   ```
-
----
-
-## Firebase Configuration
-
-To connect live Firebase Cloud Firestore and Authentication, populate `.env` with your project keys:
-
-```env
-VITE_FIREBASE_API_KEY=your_actual_api_key
-VITE_FIREBASE_AUTH_DOMAIN=your_project.firebaseapp.com
-VITE_FIREBASE_PROJECT_ID=your_project_id
-VITE_FIREBASE_STORAGE_BUCKET=your_project.appspot.com
-VITE_FIREBASE_MESSAGING_SENDER_ID=your_sender_id
-VITE_FIREBASE_APP_ID=your_app_id
-```
-
-If these keys remain empty or placeholders, VaxSafe automatically operates with its integrated high-fidelity local operations engine so all features (registration, scanning, transit, telemetry, alerts, and rerouting) can be fully evaluated immediately.
+- Select one or more batches via row checkboxes (checkbox is hidden for
+  batches that are already `DISCARDED` or currently `In Transit`).
+- Click **Discard Selected (n)** (or the trash icon on a single row).
+- A confirmation modal requires a **discard reason** before it will submit.
+- On confirm, `discardBatches()` → `dataService.discardVaccine()` runs for
+  each selected batch:
+  - Batch is **never deleted** — `status` is set to `DISCARDED`.
+  - `discardReason`, `discardedAt`, `discardedBy`, `previousStatus`, and
+    `availableQuantity: 0` are recorded on the batch.
+  - A history entry is written with **batch ID, vaccine name, quantity,
+    reason, clinic, and timestamp**.
+  - Duplicate discard is rejected (`"already been discarded"`).
+  - A batch currently `In Transit` cannot be discarded until it's received.
+- Discarded batches are automatically excluded from **Smart Rerouting**
+  (which only lists `In Storage` / `Compromised` batches) and from Scan Out
+  eligibility (see below) — so they can never re-enter transfer.
 
 ---
 
-## Vercel Deployment
+## 3. QR-Based Scan Out
 
-Deploy directly via Vercel CLI or by linking your Git repository:
+**Where:** `QRScannerPage.jsx` (Optical QR Scanning & Cold-Chain Transit)
 
-```bash
-npx vercel
-```
-The included `vercel.json` ensures that all single-page application routes redirect to `index.html`.
+1. Operator scans the batch's QR (camera or manual batch-ID fallback —
+   both use the existing `QRScanner` component).
+2. `getVaccineByBatchId()` verifies the QR belongs to a **registered**
+   batch. Unknown QR → rejected with a clear error, no further action
+   possible.
+3. Batch details are shown before any confirmation: **Batch ID, vaccine
+   name, quantity, source clinic, status**.
+4. The **Confirm Scan Out** action only appears when the batch is
+   *eligible*:
+   - not `DISCARDED`
+   - not already `In Transit` (blocks duplicate Scan Out)
+   - held in custody at the scanning clinic
+   - status is `In Storage` or `QUARANTINE_REVIEW`
+5. Operator selects a destination facility and confirms. There is **no
+   manual-confirmation-only path** — the action button is unreachable
+   without a prior successful scan.
+6. On confirm, `dataService.scanOutVaccine()`:
+   - status → `In Transit`
+   - `destinationClinicId` / `destinationClinicName` set
+   - source inventory decreases (status-driven: the batch leaves the
+     "In Storage" bucket at the source clinic)
+   - history entry recorded (`action: SCAN_OUT`, timestamp, clinics, qty)
+
+---
+
+## 4. QR-Based Scan In
+
+**Where:** same `QRScannerPage.jsx`, at the destination clinic.
+
+1. Destination staff scan the **same** QR code (same `batchId`, no new QR).
+2. `dataService.scanInVaccine()` verifies, in order:
+   - QR belongs to a registered batch (else "Unknown QR")
+   - batch is not `DISCARDED`
+   - batch has an **active** `In Transit` transfer (else rejected —
+     covers "no Scan Out yet" and "duplicate Scan In", since a batch that
+     was already received is no longer `In Transit`)
+   - the batch's `destinationClinicId` matches the **current, logged-in**
+     clinic (else "Wrong destination" — rejected even with a valid QR)
+3. On success:
+   - status → `In Storage` (RECEIVED / IN STORAGE)
+   - custody transfers: `clinicId` / `clinicName` become the destination
+   - destination inventory increases (status-driven)
+   - history entry recorded (`action: SCAN_IN`, timestamp, clinics, qty)
+
+---
+
+## 5. Safety Rules Enforced
+
+| Rule | Enforced by |
+|---|---|
+| Never delete a batch on discard | `discardVaccine()` only mutates `status` |
+| Never transfer a discarded batch | `scanOutVaccine()` / rerouting filter check `status !== 'DISCARDED'` |
+| Never Scan In without a valid Scan Out | `scanInVaccine()` requires `status === 'In Transit'` |
+| Never Scan In with the wrong QR | batch must resolve via `getVaccineByBatchId()`; unknown → rejected |
+| Never Scan In at the wrong destination | `destinationClinicId` must equal the scanning clinic's ID |
+| No duplicate Scan Out | rejected once status is already `In Transit` |
+| No duplicate Scan In | rejected once status is no longer `In Transit` (already received) |
+| No duplicate Discard | rejected once status is already `DISCARDED` |
+| Batch-level temperature / excursion / quarantine logic | untouched — `evaluateBatchExcursions()` unchanged |
+
+All local-storage mutations re-validate state **immediately before writing**
+(not just at the start of the function) to close the race window between
+two rapid duplicate scans.
+
+---
+
+## 6. Files Changed
+
+| File | Change |
+|---|---|
+| `src/services/dataService.js` | Added `getVaccineById`, `discardVaccine`, `scanOutVaccine`, `scanInVaccine` |
+| `src/context/DataContext.jsx` | Added `discardBatches`, `scanOutBatch`, `scanInBatch` |
+| `src/pages/VaccinesPage.jsx` | Multi-select checkboxes, Discard button/modal, DISCARDED filter |
+| `src/pages/QRScannerPage.jsx` | Replaced manual dispatch/accept flow with QR-gated Scan Out / Scan In |
+| `src/pages/VaccineDetailPage.jsx` | Hides "Flag as Compromised" for discarded batches |
+| `src/components/common/Badge.jsx` | Added `discarded` badge style |
+
+No changes were made to QR generation (`QRGeneratorModal.jsx`), the scanner
+component (`QRScanner.jsx`), authentication, temperature monitoring, or
+breach-alert logic.
+
+---
+
+## 7. Test Cases Verified
+
+1. Valid QR → Scan Out succeeds ✅
+2. Unknown QR → rejected ✅
+3. Wrong/non-transfer batch → rejected ✅
+4. Same QR → Scan In at correct destination succeeds ✅
+5. Same QR → Scan In at wrong destination rejected ✅
+6. Scan In without Scan Out rejected ✅
+7. Duplicate Scan Out rejected ✅
+8. Duplicate Scan In rejected ✅
+9. Discarded batch QR → transfer rejected ✅
+10. Inventory and history update correctly after every operation ✅
+
+These were run against the live `dataService` module (bundled and executed
+in isolation with a mocked `localStorage`) and all passed with the exact
+rejection messages shown in-app.
