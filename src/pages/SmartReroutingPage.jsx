@@ -28,9 +28,9 @@ export default function SmartReroutingPage() {
   const [selectedBatchIds, setSelectedBatchIds] = useState([]);
   const [isExecuting, setIsExecuting] = useState(false);
 
-  // Batches eligible for rerouting (In Storage or Compromised)
+  // Batches eligible for rerouting (In Storage or Compromised, never DISCARDED)
   const eligibleVaccines = vaccines.filter(
-    (v) => v.status === 'In Storage' || v.status === 'Compromised'
+    (v) => (v.status === 'In Storage' || v.status === 'IN_STORAGE' || v.status === 'Compromised') && v.status !== 'DISCARDED'
   );
 
   // Ranked destination facilities by Haversine spherical distance

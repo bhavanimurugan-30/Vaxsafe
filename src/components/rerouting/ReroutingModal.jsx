@@ -22,9 +22,9 @@ export default function ReroutingModal({
   const [selectedDestination, setSelectedDestination] = useState(null);
   const [isTransferring, setIsTransferring] = useState(false);
 
-  // Eligible vaccines at current facility
+  // Eligible vaccines at current facility (excludes DISCARDED)
   const eligibleVaccines = vaccines.filter(
-    (v) => v.status === 'In Storage' || v.status === 'Compromised'
+    (v) => (v.status === 'In Storage' || v.status === 'IN_STORAGE' || v.status === 'Compromised') && v.status !== 'DISCARDED'
   );
 
   // Rank candidate destination clinics by Haversine distance

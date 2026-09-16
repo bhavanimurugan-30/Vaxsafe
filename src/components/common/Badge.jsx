@@ -13,7 +13,8 @@ export default function Badge({ children, variant = 'default', size = 'md', clas
     critical: 'bg-red-50 text-red-800 border-red-200 font-semibold',
     excursion: 'bg-orange-50 text-orange-800 border-orange-200 font-semibold',
     quarantine: 'bg-purple-50 text-purple-900 border-purple-200 font-semibold',
-    quarantine_review: 'bg-purple-50 text-purple-900 border-purple-200 font-semibold'
+    quarantine_review: 'bg-purple-50 text-purple-900 border-purple-200 font-semibold',
+    discarded: 'bg-slate-100 text-slate-700 border-slate-300 font-semibold'
   };
 
   const sizes = {
@@ -26,10 +27,11 @@ export default function Badge({ children, variant = 'default', size = 'md', clas
   let resolvedVariant = variant;
   if (typeof children === 'string') {
     const text = children.toLowerCase();
-    if (text.includes('quarantine')) resolvedVariant = 'quarantine_review';
+    if (text.includes('discard')) resolvedVariant = 'discarded';
+    else if (text.includes('quarantine')) resolvedVariant = 'quarantine_review';
     else if (text.includes('storage')) resolvedVariant = 'storage';
     else if (text.includes('transit')) resolvedVariant = 'transit';
-    else if (text.includes('deliver')) resolvedVariant = 'delivered';
+    else if (text.includes('deliver') || text.includes('received')) resolvedVariant = 'delivered';
     else if (text.includes('compromised')) resolvedVariant = 'compromised';
     else if (text.includes('safe') || text.includes('normal')) resolvedVariant = 'safe';
     else if (text.includes('critical')) resolvedVariant = 'critical';
@@ -42,6 +44,7 @@ export default function Badge({ children, variant = 'default', size = 'md', clas
       className={`inline-flex items-center gap-1.5 font-medium rounded-full border ${variants[resolvedVariant] || variants.default} ${sizes[size]} ${className}`}
     >
       <span className={`w-1.5 h-1.5 rounded-full ${
+        resolvedVariant === 'discarded' ? 'bg-slate-500' :
         resolvedVariant === 'storage' ? 'bg-teal-500' :
         resolvedVariant === 'transit' ? 'bg-sky-500' :
         resolvedVariant === 'delivered' ? 'bg-emerald-500' :

@@ -72,7 +72,7 @@ export default function VaccineDetailPage({ vaccine, isOpen, onClose }) {
             </Button>
 
             <div className="flex gap-2">
-              {vaccine.status !== 'Compromised' && (
+              {vaccine.status !== 'Compromised' && vaccine.status !== 'DISCARDED' && (
                 <Button
                   variant="danger"
                   size="sm"

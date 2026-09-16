@@ -9,7 +9,10 @@ import {
   updateVaccineStatus,
   addTemperatureLog,
   resolveBreachAlert,
-  rerouteVaccines
+  rerouteVaccines,
+  discardVaccines,
+  scanOutVaccine,
+  scanInVaccine
 } from '../services/dataService';
 import { mockSensor } from '../services/mockSensors';
 
@@ -65,11 +68,17 @@ export function DataProvider({ children }) {
   const stats = useMemo(() => {
     // Current clinic's inventory
     const totalVaccines = vaccines.length;
-    const inStorage = vaccines.filter(v => v.status === 'In Storage').length;
-    const inTransit = vaccines.filter(v => v.status === 'In Transit').length;
+    const inStorage = vaccines.filter(v => (v.status === 'In Storage' || v.status === 'IN_STORAGE') && v.clinicId === currentUser?.clinicId).length;
+    const inTransit = vaccines.filter(v => v.status === 'In Transit' || v.status === 'IN_TRANSIT').length;
     const delivered = vaccines.filter(v => v.status === 'Delivered').length;
     const compromised = vaccines.filter(v => v.status === 'Compromised').length;
     const quarantineReview = vaccines.filter(v => v.status === 'QUARANTINE_REVIEW').length;
+    const discarded = vaccines.filter(v => v.status === 'DISCARDED').length;
+
+    // Available doses in storage at this clinic (excludes discarded & in transit)
+    const storedDoses = vaccines
+      .filter(v => (v.status === 'In Storage' || v.status === 'IN_STORAGE') && v.clinicId === currentUser?.clinicId)
+      .reduce((sum, v) => sum + (Number(v.quantity) || 0), 0);
 
     // Latest temperature reading
     const latestLog = tempLogs[0] || null;
@@ -79,7 +88,6 @@ export function DataProvider({ children }) {
     const activeExcursions = activeBreaches.filter(a => a.timerActive);
 
     // Evaluate overall status based on batch excursions and quarantine state:
-    // Status precedence: CRITICAL > WARNING > QUARANTINE_REVIEW > NORMAL
     let overallStatus = 'NORMAL';
     if (activeBreaches.some(a => a.status === 'CRITICAL')) {
       overallStatus = 'CRITICAL';
@@ -93,7 +101,7 @@ export function DataProvider({ children }) {
 
     // Check if currentTemp is outside any active storage batch's allowed range
     const breachedBatches = vaccines.filter(v => {
-      if (v.status === 'Delivered' || v.status === 'Compromised') return false;
+      if (v.status === 'Delivered' || v.status === 'Compromised' || v.status === 'DISCARDED') return false;
       if (typeof v.minTemperature !== 'number' || typeof v.maxTemperature !== 'number') return false;
       return currentTemp < v.minTemperature || currentTemp > v.maxTemperature;
     });
@@ -107,6 +115,8 @@ export function DataProvider({ children }) {
       delivered,
       compromised,
       quarantineReview,
+      discarded,
+      storedDoses,
       currentTemp,
       tempStatus: overallStatus,
       isBreached,
@@ -115,7 +125,7 @@ export function DataProvider({ children }) {
       activeExcursions,
       breachedBatches
     };
-  }, [vaccines, tempLogs, alerts]);
+  }, [vaccines, tempLogs, alerts, currentUser?.clinicId]);
 
   // Action methods
   const createVaccine = async (vaccineData) => {
@@ -132,6 +142,31 @@ export function DataProvider({ children }) {
       clinicName: currentUser.clinicName,
       userId: currentUser.email,
       ...details
+    });
+  };
+
+  const discardVaccineBatches = async (vaccineIds, reason) => {
+    return await discardVaccines(vaccineIds, reason, currentUser?.email || 'staff');
+  };
+
+  const scanOutBatch = async ({ batchId, destinationClinicId, destinationClinicName, notes = '' }) => {
+    return await scanOutVaccine({
+      batchId,
+      originClinicId: currentUser?.clinicId,
+      destinationClinicId,
+      destinationClinicName,
+      operatorEmail: currentUser?.email || 'staff',
+      notes
+    });
+  };
+
+  const scanInBatch = async ({ batchId, notes = '' }) => {
+    return await scanInVaccine({
+      batchId,
+      receivingClinicId: currentUser?.clinicId,
+      receivingClinicName: currentUser?.clinicName,
+      operatorEmail: currentUser?.email || 'staff',
+      notes
     });
   };
 
@@ -168,6 +203,9 @@ export function DataProvider({ children }) {
     sensorState,
     createVaccine,
     changeVaccineStatus,
+    discardVaccineBatches,
+    scanOutBatch,
+    scanInBatch,
     recordManualTemperature,
     resolveAlertItem,
     executeReroute,

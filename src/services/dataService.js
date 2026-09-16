@@ -450,6 +450,286 @@ export async function rerouteVaccines(vaccineIds, originClinic, destinationClini
   return true;
 }
 
+// Discard one or multiple vaccine batches (never permanently deleted)
+export async function discardVaccines(vaccineIds, reason, userId = 'operator') {
+  if (!vaccineIds || !vaccineIds.length) {
+    throw new Error('No vaccine batches specified for discard.');
+  }
+  if (!reason || !reason.trim()) {
+    throw new Error('A valid discard reason is required.');
+  }
+
+  const timestamp = new Date().toISOString();
+  const all = loadStorage(STORAGE_KEYS.VACCINES, INITIAL_VACCINES);
+  const historyMap = loadStorage(STORAGE_KEYS.HISTORY, INITIAL_STATUS_HISTORY);
+
+  let updatedCount = 0;
+
+  for (const id of vaccineIds) {
+    const idx = all.findIndex((v) => v.id === id);
+    if (idx === -1) continue;
+
+    const vaccine = all[idx];
+
+    // Prevent duplicate discard
+    if (vaccine.status === 'DISCARDED') {
+      continue;
+    }
+
+    const updatedVaccine = {
+      ...vaccine,
+      status: 'DISCARDED',
+      discardReason: reason.trim(),
+      discardedAt: timestamp,
+      discardedBy: userId,
+      destinationClinicId: null,
+      destinationClinicName: null,
+      updatedAt: timestamp
+    };
+
+    all[idx] = updatedVaccine;
+
+    const historyEntry = {
+      id: `sh-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      status: 'DISCARDED',
+      timestamp,
+      clinicId: vaccine.clinicId,
+      clinicName: vaccine.clinicName,
+      userId,
+      batchId: vaccine.batchId,
+      vaccineName: vaccine.vaccineName,
+      quantity: vaccine.quantity,
+      note: `Batch discarded (${vaccine.quantity} doses removed from available inventory). Reason: ${reason.trim()}`
+    };
+
+    if (!historyMap[id]) historyMap[id] = [];
+    historyMap[id].push(historyEntry);
+
+    if (isFirebaseConfigured && db) {
+      try {
+        await updateDoc(doc(db, 'vaccines', id), updatedVaccine);
+        await addDoc(collection(db, `vaccines/${id}/statusHistory`), historyEntry);
+      } catch (e) {
+        console.warn('Firestore discard update error:', e);
+      }
+    }
+    updatedCount++;
+  }
+
+  if (updatedCount === 0) {
+    throw new Error('Selected batch(es) are already DISCARDED.');
+  }
+
+  saveStorage(STORAGE_KEYS.VACCINES, all);
+  saveStorage(STORAGE_KEYS.HISTORY, historyMap);
+  notifyListeners('vaccines');
+  return true;
+}
+
+// QR-Based Scan Out with validation, inventory decrease, and custody transfer
+export async function scanOutVaccine({ batchId, originClinicId, destinationClinicId, destinationClinicName, operatorEmail = 'staff', notes = '' }) {
+  if (!batchId) throw new Error('No Batch ID provided for Scan Out.');
+  const vac = await getVaccineByBatchId(batchId);
+
+  // 1. Unknown QR
+  if (!vac) {
+    throw new Error(`Unknown QR code. Batch "${batchId}" is not registered in VaxSafe.`);
+  }
+
+  // 2. Discarded batch
+  if (vac.status === 'DISCARDED') {
+    throw new Error(`Transfer rejected: Batch "${batchId}" is DISCARDED and cannot be transferred.`);
+  }
+
+  // 3. Duplicate Scan Out / already In Transit
+  if (vac.status === 'IN_TRANSIT' || vac.status === 'In Transit') {
+    throw new Error(`Duplicate Scan Out rejected: Batch "${batchId}" is already In Transit to ${vac.destinationClinicName || 'destination'}.`);
+  }
+
+  // 4. Non-transfer / wrong clinic
+  if (originClinicId && vac.clinicId !== originClinicId) {
+    throw new Error(`Scan Out rejected: Batch "${batchId}" is currently in custody of ${vac.clinicName}, not this facility.`);
+  }
+
+  // 5. Valid destination required & cannot be origin
+  if (!destinationClinicId) {
+    throw new Error('Scan Out rejected: Destination clinic must be selected.');
+  }
+  if (destinationClinicId === vac.clinicId) {
+    throw new Error('Scan Out rejected: Destination clinic cannot be the same as the source clinic.');
+  }
+
+  const timestamp = new Date().toISOString();
+  const all = loadStorage(STORAGE_KEYS.VACCINES, INITIAL_VACCINES);
+  const historyMap = loadStorage(STORAGE_KEYS.HISTORY, INITIAL_STATUS_HISTORY);
+  const idx = all.findIndex((v) => v.id === vac.id);
+
+  const updatedVac = {
+    ...vac,
+    status: 'IN_TRANSIT',
+    destinationClinicId,
+    destinationClinicName,
+    scannedOutAt: timestamp,
+    scannedOutBy: operatorEmail,
+    updatedAt: timestamp
+  };
+
+  if (idx !== -1) {
+    all[idx] = updatedVac;
+  }
+
+  if (!historyMap[vac.id]) historyMap[vac.id] = [];
+
+  // Transfer history: Scan Out
+  const scanOutHistory = {
+    id: `sh-${Date.now()}-so`,
+    status: 'IN_TRANSIT',
+    timestamp,
+    clinicId: vac.clinicId,
+    clinicName: vac.clinicName,
+    destinationClinicId,
+    destinationClinicName,
+    userId: operatorEmail,
+    batchId: vac.batchId,
+    vaccineName: vac.vaccineName,
+    quantity: vac.quantity,
+    note: `QR Scan Out verified. Dispatched from ${vac.clinicName} to ${destinationClinicName}. ${notes ? `Notes: ${notes}` : ''}`
+  };
+
+  // Inventory record: Source inventory decrease
+  const invDecreaseHistory = {
+    id: `sh-${Date.now()}-dec`,
+    status: 'Inventory Decreased',
+    timestamp,
+    clinicId: vac.clinicId,
+    clinicName: vac.clinicName,
+    userId: operatorEmail,
+    batchId: vac.batchId,
+    vaccineName: vac.vaccineName,
+    quantity: vac.quantity,
+    note: `Source inventory at ${vac.clinicName} decreased by ${vac.quantity} doses (Batch ${vac.batchId} departed cold storage).`
+  };
+
+  historyMap[vac.id].push(scanOutHistory);
+  historyMap[vac.id].push(invDecreaseHistory);
+
+  if (isFirebaseConfigured && db) {
+    try {
+      await updateDoc(doc(db, 'vaccines', vac.id), updatedVac);
+      await addDoc(collection(db, `vaccines/${vac.id}/statusHistory`), scanOutHistory);
+      await addDoc(collection(db, `vaccines/${vac.id}/statusHistory`), invDecreaseHistory);
+    } catch (e) {
+      console.warn('Firestore scanOut error:', e);
+    }
+  }
+
+  saveStorage(STORAGE_KEYS.VACCINES, all);
+  saveStorage(STORAGE_KEYS.HISTORY, historyMap);
+  notifyListeners('vaccines');
+
+  return updatedVac;
+}
+
+// QR-Based Scan In with validation, custody transfer, and destination inventory increase
+export async function scanInVaccine({ batchId, receivingClinicId, receivingClinicName, operatorEmail = 'staff', notes = '' }) {
+  if (!batchId) throw new Error('No Batch ID provided for Scan In.');
+  const vac = await getVaccineByBatchId(batchId);
+
+  // 1. Unknown QR
+  if (!vac) {
+    throw new Error(`Unknown QR code. Batch "${batchId}" is not registered in VaxSafe.`);
+  }
+
+  // 2. Discarded batch
+  if (vac.status === 'DISCARDED') {
+    throw new Error(`Scan In rejected: Batch "${batchId}" is DISCARDED.`);
+  }
+
+  // 3. Scan In without Scan Out / already received
+  const isTransit = vac.status === 'IN_TRANSIT' || vac.status === 'In Transit';
+  if (!isTransit) {
+    if ((vac.status === 'IN_STORAGE' || vac.status === 'In Storage' || vac.status === 'Delivered') && vac.clinicId === receivingClinicId) {
+      throw new Error(`Duplicate Scan In rejected: Batch "${batchId}" has already been received and is in storage at ${receivingClinicName}.`);
+    }
+    throw new Error(`Scan In rejected: Scan In without Scan Out is prohibited. Batch "${batchId}" is currently "${vac.status}", not IN_TRANSIT.`);
+  }
+
+  // 4. Wrong destination clinic
+  if (vac.destinationClinicId && receivingClinicId && vac.destinationClinicId !== receivingClinicId) {
+    throw new Error(`Scan In rejected: Wrong destination facility! Batch "${batchId}" was routed to ${vac.destinationClinicName || vac.destinationClinicId}, not ${receivingClinicName}.`);
+  }
+
+  const timestamp = new Date().toISOString();
+  const all = loadStorage(STORAGE_KEYS.VACCINES, INITIAL_VACCINES);
+  const historyMap = loadStorage(STORAGE_KEYS.HISTORY, INITIAL_STATUS_HISTORY);
+  const idx = all.findIndex((v) => v.id === vac.id);
+
+  const updatedVac = {
+    ...vac,
+    status: 'IN_STORAGE',
+    clinicId: receivingClinicId,
+    clinicName: receivingClinicName,
+    destinationClinicId: null,
+    destinationClinicName: null,
+    scannedInAt: timestamp,
+    scannedInBy: operatorEmail,
+    updatedAt: timestamp
+  };
+
+  if (idx !== -1) {
+    all[idx] = updatedVac;
+  }
+
+  if (!historyMap[vac.id]) historyMap[vac.id] = [];
+
+  // Transfer history: Scan In
+  const scanInHistory = {
+    id: `sh-${Date.now()}-si`,
+    status: 'IN_STORAGE',
+    timestamp,
+    clinicId: receivingClinicId,
+    clinicName: receivingClinicName,
+    userId: operatorEmail,
+    batchId: vac.batchId,
+    vaccineName: vac.vaccineName,
+    quantity: vac.quantity,
+    note: `QR Scan In verified. Custody received at ${receivingClinicName} and transferred into certified cold storage. ${notes ? `Notes: ${notes}` : ''}`
+  };
+
+  // Inventory record: Destination inventory increase
+  const invIncreaseHistory = {
+    id: `sh-${Date.now()}-inc`,
+    status: 'Inventory Increased',
+    timestamp,
+    clinicId: receivingClinicId,
+    clinicName: receivingClinicName,
+    userId: operatorEmail,
+    batchId: vac.batchId,
+    vaccineName: vac.vaccineName,
+    quantity: vac.quantity,
+    note: `Destination inventory at ${receivingClinicName} increased by ${vac.quantity} doses (Batch ${vac.batchId} accepted into storage).`
+  };
+
+  historyMap[vac.id].push(scanInHistory);
+  historyMap[vac.id].push(invIncreaseHistory);
+
+  if (isFirebaseConfigured && db) {
+    try {
+      await updateDoc(doc(db, 'vaccines', vac.id), updatedVac);
+      await addDoc(collection(db, `vaccines/${vac.id}/statusHistory`), scanInHistory);
+      await addDoc(collection(db, `vaccines/${vac.id}/statusHistory`), invIncreaseHistory);
+    } catch (e) {
+      console.warn('Firestore scanIn error:', e);
+    }
+  }
+
+  saveStorage(STORAGE_KEYS.VACCINES, all);
+  saveStorage(STORAGE_KEYS.HISTORY, historyMap);
+  notifyListeners('vaccines');
+
+  return updatedVac;
+}
+
 // ==========================================
 // TEMPERATURE LOGS
 // ==========================================
